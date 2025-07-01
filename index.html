@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>本地漫画阅读器 - v5.2 (滚轮翻页版)</title>
+    <style>
+        :root{--bg-color:#2c2c2c;--ui-color:#383838;--text-color:#f1f1f1;--button-color:#555;--button-hover-color:#777;--accent-color:#007bff}
+        html,body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;margin:0;background-color:var(--bg-color);color:var(--text-color);height:100vh;overflow:hidden}
+        body{display:flex;flex-direction:column}
+        .controls{padding:10px 15px;background-color:var(--ui-color);box-shadow:0 -2px 5px rgba(0,0,0,.5);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;z-index:10}
+        .controls .left-group,.controls .right-group{display:flex;align-items:center;gap:10px}
+        .controls button,.controls label{background-color:var(--button-color);color:#fff;border:none;padding:8px 12px;border-radius:5px;cursor:pointer;font-size:14px}
+        .controls button:hover,.controls label:hover{background-color:var(--button-hover-color)}
+        .controls button:disabled{background-color:#444;color:#888;cursor:not-allowed}
+        #interval-input{width:40px;background-color:#333;color:#fff;border:1px solid #666;border-radius:4px;text-align:center;font-size:14px;padding:4px}
+        .viewer{flex-grow:1;display:flex;align-items:center;overflow:hidden}
+        .img-container{flex:1;display:flex;align-items:center;height:100%;overflow:auto}
+        #container-left{justify-content:flex-end}
+        #container-right{justify-content:flex-start}
+        .comic-image{max-width:100%;max-height:100%;object-fit:contain;display:none}
+        #initial-prompt{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-size:1.2em;color:#aaa;width:100%;height:100%}
+        #folder-input{display:none}
+        #prompt-folder-btn{background-color:var(--accent-color,#007bff);color:#fff;border:none;padding:15px 30px;border-radius:8px;cursor:pointer;font-size:1.1em;font-weight:700;margin-top:25px;transition:background-color .2s ease-in-out,transform .1s ease}
+        #prompt-folder-btn:hover{background-color:#0056b3}
+        #prompt-folder-btn:active{transform:scale(.98)}
+        :fullscreen .controls{display:none}
+        #page-status{font-size:16px;font-weight:700;min-width:80px;text-align:center;cursor:pointer;border-radius:4px;padding:4px 0;}
+        #page-status:hover{background-color:var(--button-color);}
+        #page-jump-input{width:60px;background-color:#333;color:#fff;border:1px solid var(--accent-color);border-radius:4px;text-align:center;font-size:16px;padding:4px;font-weight:700;}
+    </style>
+</head>
+<body>
+    <div class="viewer">
+        <div id="initial-prompt">
+             <div>
+                <h2>本地漫画阅读器</h2>
+                <p>请选择一个包含漫画图片的文件夹</p>
+                <button id="prompt-folder-btn">📂 选择文件夹开始</button>
+            </div>
+        </div>
+        <div class="img-container" id="container-left">
+            <img class="comic-image" id="image-left" alt="漫画左页">
+        </div>
+        <div class="img-container" id="container-right">
+            <img class="comic-image" id="image-right" alt="漫画右页">
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="left-group">
+            <label for="folder-input" id="folder-label">📂 选择文件夹</label>
+            <input type="file" id="folder-input" webkitdirectory directory multiple>
+            <button id="toggle-view-btn" disabled>📖 切换双页</button>
+            <button id="fullscreen-btn" disabled>⛶ 全屏</button>
+            <button id="autoplay-btn" disabled>▶️ 自动翻页</button>
+            <input type="number" id="interval-input" value="30" min="1" disabled>
+            <label for="interval-input">秒</label>
+        </div>
+        <div class="right-group">
+            <span id="countdown-display"></span>
+            <button id="prev-btn" disabled>上一页</button>
+            <span id="page-status">0 / 0</span>
+            <input type="number" id="page-jump-input" style="display: none;">
+            <button id="next-btn" disabled>下一页</button>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const folderInput = document.getElementById('folder-input');
+        const imageLeft = document.getElementById('image-left'), imageRight = document.getElementById('image-right'), containerLeft = document.getElementById('container-left'), containerRight = document.getElementById('container-right'), pageStatus = document.getElementById('page-status'), prevBtn = document.getElementById('prev-btn'), nextBtn = document.getElementById('next-btn'), initialPrompt = document.getElementById('initial-prompt'), toggleViewBtn = document.getElementById('toggle-view-btn'), fullscreenBtn = document.getElementById('fullscreen-btn');
+        const autoplayBtn = document.getElementById('autoplay-btn');
+        const intervalInput = document.getElementById('interval-input');
+        const countdownDisplay = document.getElementById('countdown-display');
+        const promptFolderBtn = document.getElementById('prompt-folder-btn');
+        const pageJumpInput = document.getElementById('page-jump-input');
+        const viewer = document.querySelector('.viewer');
+
+        // State Variables
+        let imageFiles = [], currentPageIndex = 0, viewMode = 'single', objectUrls = [];
+        let autoplayInterval = 30, isAutoplaying = false, autoplayTimerId = null, countdownTimerId = null, countdownValue = 0;
+        let wheelThrottleTimer = null; // 新增：滚轮事件节流计时器
+
+        // --- Event Listeners ---
+        promptFolderBtn.addEventListener('click', () => { folderInput.click(); });
+        folderInput.addEventListener('change', handleFolderSelection);
+        prevBtn.addEventListener('click', prevPage);
+        nextBtn.addEventListener('click', nextPage);
+        autoplayBtn.addEventListener("click", toggleAutoplay);
+        intervalInput.addEventListener("change",()=>{autoplayInterval=parseInt(intervalInput.value,10)||30;isAutoplaying&&startAutoplay()});
+        toggleViewBtn.addEventListener("click",()=>{("single"===viewMode?(viewMode="double",toggleViewBtn.textContent="📖 切换单页",currentPageIndex>0&&currentPageIndex%2==0&&currentPageIndex--):(viewMode="single",toggleViewBtn.textContent="📖 切换双页"),displayPage())});
+        fullscreenBtn.addEventListener("click",()=>{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()});
+        document.addEventListener("fullscreenchange",()=>{fullscreenBtn.textContent=document.fullscreenElement?"退出全屏":"⛶ 全屏"});
+        pageStatus.addEventListener('click', showPageJumpInput);
+        pageJumpInput.addEventListener('blur', handlePageJump);
+        pageJumpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handlePageJump(); });
+        viewer.addEventListener('click', handleViewerClick);
+        document.addEventListener("keydown", handleKeyDown);
+        
+        // 新增功能：监听鼠标滚轮事件
+        document.addEventListener('wheel', handleWheelScroll, { passive: false });
+
+        // --- Functions ---
+        function handleViewerClick(e) {
+            if (imageFiles.length === 0 || e.target.closest('#initial-prompt') || e.target.closest('.controls')) return;
+            if (e.clientX < window.innerWidth / 2) prevPage();
+            else nextPage();
+        }
+
+        function handleKeyDown(e) {
+            if (e.target.tagName === 'INPUT') return;
+            if (imageFiles.length === 0) return;
+            switch (e.key) {
+                case ' ': e.preventDefault(); autoplayBtn.click(); break;
+                case 'ArrowRight': nextPage(); break;
+                case 'ArrowLeft': prevPage(); break;
+                case 'Enter': e.preventDefault(); fullscreenBtn.click(); break;
+            }
+        }
+        
+        // 新增功能：处理滚轮滚动的函数
+        function handleWheelScroll(e) {
+            if (imageFiles.length === 0) return;
+            if (wheelThrottleTimer) return; // 如果节流计时器正在运行，则忽略
+
+            e.preventDefault(); // 阻止页面的默认滚动行为
+
+            if (e.deltaY > 0) nextPage();
+            else if (e.deltaY < 0) prevPage();
+
+            // 启动节流计时器
+            wheelThrottleTimer = setTimeout(() => {
+                wheelThrottleTimer = null;
+            }, 300); // 300毫秒的延迟
+        }
+
+        function handleFolderSelection(event) {
+            const files = Array.from(event.target.files).filter(file => /\.(jpe?g|png|gif|webp|bmp)$/i.test(file.name));
+            imageFiles = files.sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
+            
+            if (imageFiles.length > 0) {
+                currentPageIndex = 0;
+                objectUrls.forEach(url => URL.revokeObjectURL(url));
+                objectUrls = imageFiles.map(file => URL.createObjectURL(file));
+                initialPrompt.style.display = 'none';
+                if (isAutoplaying) stopAutoplay();
+                displayPage();
+            } else {
+                alert("文件夹中没有找到图片文件！");
+            }
+        }
+
+        function nextPage() {
+            if (currentPageIndex >= imageFiles.length - 1) {
+                stopAutoplay(); 
+                return;
+            }
+            const step = (viewMode === 'double' && currentPageIndex > 0) ? 2 : 1;
+            currentPageIndex = Math.min(imageFiles.length - 1, currentPageIndex + step);
+            displayPage();
+            resetAutoplayTimer();
+        }
+
+        function prevPage() {
+            if (currentPageIndex === 0) return;
+            const step = (viewMode === 'double' && currentPageIndex > 1) ? 2 : 1;
+            currentPageIndex = Math.max(0, currentPageIndex - step);
+            displayPage();
+            resetAutoplayTimer();
+        }
+
+        function updateUI(){
+            const total = imageFiles.length;
+            const hasImages = total > 0;
+            if (hasImages) {
+                if (viewMode === "single") {
+                    pageStatus.textContent = `${currentPageIndex + 1} / ${total}`;
+                } else {
+                    if (currentPageIndex === 0) pageStatus.textContent = `1 / ${total}`;
+                    else {
+                        const leftPage = (currentPageIndex % 2 === 1) ? currentPageIndex : currentPageIndex - 1;
+                        const rightPage = leftPage + 1;
+                        if (rightPage < total) pageStatus.textContent = `${leftPage + 1}-${rightPage + 1} / ${total}`;
+                        else pageStatus.textContent = `${leftPage + 1} / ${total}`;
+                    }
+                }
+            } else pageStatus.textContent = `0 / 0`;
+            prevBtn.disabled = (currentPageIndex === 0);
+            nextBtn.disabled = (currentPageIndex >= total - 1);
+            toggleViewBtn.disabled = !hasImages;
+            fullscreenBtn.disabled = !hasImages;
+            autoplayBtn.disabled = !hasImages;
+            intervalInput.disabled = !hasImages;
+        }
+
+        function displayPage(){
+            if (imageFiles.length === 0) return;
+            hideAllImages();
+            containerLeft.style.display="flex"; containerRight.style.display="flex";
+            if ("single"===viewMode) {
+                containerLeft.style.display="none"; containerRight.style.justifyContent="center";
+                displayImage(imageRight, currentPageIndex);
+            } else {
+                containerLeft.style.justifyContent="flex-end"; containerRight.style.justifyContent="flex-start";
+                if (0===currentPageIndex) {
+                    containerLeft.style.display="none"; displayImage(imageRight, 0);
+                } else if (currentPageIndex%2==1) {
+                    displayImage(imageLeft, currentPageIndex); displayImage(imageRight, currentPageIndex + 1);
+                } else {
+                    displayImage(imageLeft, currentPageIndex - 1); displayImage(imageRight, currentPageIndex);
+                }
+            }
+            updateUI();
+        }
+
+        function displayImage(e,t){t>=0&&t<imageFiles.length?(e.src=objectUrls[t],e.style.display="block"):e.style.display="none"}
+        function hideAllImages(){imageLeft.style.display="none";imageRight.style.display="none"}
+        
+        function toggleAutoplay() {
+            if(isAutoplaying) stopAutoplay();
+            else {
+                if(currentPageIndex >= imageFiles.length - 1) {
+                    currentPageIndex = 0;
+                    displayPage();
+                }
+                autoplayInterval = parseInt(intervalInput.value, 10) || 30;
+                startAutoplay();
+            }
+        }
+        function startAutoplay(){clearTimeout(autoplayTimerId);clearInterval(countdownTimerId);isAutoplaying=!0;autoplayBtn.textContent="⏸️ 停止翻页";countdownValue=autoplayInterval;autoplayTimerId=setTimeout(()=>{currentPageIndex>=imageFiles.length-1?stopAutoplay():nextPage()},1e3*autoplayInterval);countdownDisplay.textContent=`(${countdownValue}s)`;countdownTimerId=setInterval(()=>{countdownValue--;countdownDisplay.textContent=`(${countdownValue}s)`;countdownValue<=0&&clearInterval(countdownTimerId)},1e3)}
+        function stopAutoplay(){clearTimeout(autoplayTimerId);clearInterval(countdownTimerId);isAutoplaying=!1;autoplayBtn.textContent="▶️ 自动翻页";countdownDisplay.textContent=""}
+        function resetAutoplayTimer(){isAutoplaying&&startAutoplay()}
+
+        function showPageJumpInput() {
+            if (imageFiles.length === 0) return;
+            pageStatus.style.display = 'none';
+            pageJumpInput.style.display = 'inline-block';
+            pageJumpInput.value = (viewMode === 'single' || currentPageIndex === 0) ? currentPageIndex + 1 : (currentPageIndex % 2 === 1 ? currentPageIndex : currentPageIndex -1) + 1;
+            pageJumpInput.focus();
+            pageJumpInput.select();
+        }
+
+        function handlePageJump() {
+            const targetPage = parseInt(pageJumpInput.value, 10);
+            pageJumpInput.style.display = 'none';
+            pageStatus.style.display = 'inline-block';
+            if (!isNaN(targetPage) && targetPage > 0 && targetPage <= imageFiles.length) {
+                currentPageIndex = targetPage - 1;
+                displayPage();
+                resetAutoplayTimer();
+            }
+        }
+    </script>
+</body>
+</html>
